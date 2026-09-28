@@ -22,6 +22,7 @@ const BROWSER_HEADERS = {
   "Sec-Fetch-Site": "none",
   "Upgrade-Insecure-Requests": "1",
   Connection: "keep-alive",
+  Referer: "https://crazygames.com/",
 };
 
 function sanitizeUrl(url: string): URL | null {
@@ -34,17 +35,17 @@ function sanitizeUrl(url: string): URL | null {
   }
 }
 
-function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string): string {
+function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string, requestUrl: URL): string {
   let rewritten = html;
 
   // Rewrite all src, href, srcset attributes to proxy through this worker
-  rewritten = rewritten.replace(/\b(src|href|srcset)=["']([^"']+)["']/g, (match, attr, url) => {
-    // Skip data URIs, anchors, and javascript
-    if (url.startsWith("data:") || url.startsWith("#") || url.startsWith("javascript:")) {
+  rewritten = rewritten.replace(/\b(src|href)=["']([^"']+)["']/g, (match, attr, url) => {
+    // Skip data URIs, anchors, javascript, and mailto
+    if (url.startsWith("data:") || url.startsWith("#") || url.startsWith("javascript:") || url.startsWith("mailto:")) {
       return match;
     }
 
-    // If it's a relative URL, make it absolute
+    // If it's a relative URL, make it absolute to crazygames.com
     let absoluteUrl = url;
     if (url.startsWith("/")) {
       absoluteUrl = `https://crazygames.com${url}`;
@@ -52,30 +53,52 @@ function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string): string {
       absoluteUrl = `https://crazygames.com/${url}`;
     }
 
-    const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteUrl)}`;
+    // Rewrite to proxy endpoint
+    const proxiedUrl = `/proxy?url=${encodeURIComponent(absoluteUrl)}`;
     return `${attr}="${proxiedUrl}"`;
+  });
+
+  // Rewrite form actions
+  rewritten = rewritten.replace(/action=["']([^"']+)["']/g, (match, url) => {
+    let absoluteUrl = url;
+    if (url.startsWith("/")) {
+      absoluteUrl = `https://crazygames.com${url}`;
+    } else if (!url.startsWith("http")) {
+      absoluteUrl = `https://crazygames.com/${url}`;
+    }
+    const proxiedUrl = `/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+    return `action="${proxiedUrl}"`;
   });
 
   return rewritten;
 }
 
-function buildUpstreamHeaders(request: Request, targetHost: string): Record<string, string> {
+function buildUpstreamHeaders(request: Request, targetHost: string): Headers {
   const headers = new Headers(BROWSER_HEADERS);
 
-  const cookie = request.headers.get("cookie");
-  if (cookie) headers.set("Cookie", cookie);
+  // Copy over important headers from the incoming request
+  const headersToKeep = [
+    "cookie",
+    "accept-language",
+    "accept-encoding",
+  ];
+
+  for (const header of headersToKeep) {
+    const value = request.headers.get(header);
+    if (value) {
+      headers.set(header, value);
+    }
+  }
 
   headers.set("Host", targetHost);
-  headers.delete("cf-connecting-ip");
-  headers.delete("cf-ray");
-  headers.delete("cf-visitor");
 
-  return Object.fromEntries(headers);
+  return headers;
 }
 
 async function proxyRequest(url: URL, request: Request, env: Env): Promise<Response> {
   const upstreamHeaders = buildUpstreamHeaders(request, env.TARGET_HOST);
-  const upstreamRequest = new Request(url, {
+
+  const upstreamRequest = new Request(url.toString(), {
     method: request.method,
     headers: upstreamHeaders,
     body: request.method !== "GET" && request.method !== "HEAD" ? request.body : null,
@@ -88,23 +111,35 @@ async function proxyRequest(url: URL, request: Request, env: Env): Promise<Respo
 
     if (isHtml) {
       let html = await response.text();
-      html = rewriteHtmlAssetUrls(html, "/proxy");
+      
+      // Rewrite all asset URLs and links to stay on proxy
+      html = rewriteHtmlAssetUrls(html, "/proxy", new URL(request.url));
+
+      // Also rewrite any hardcoded crazygames.com URLs to relative paths
+      html = html.replace(/https?:\/\/crazygames\.com/g, "");
+      html = html.replace(/https?:\/\/[a-zA-Z0-9\-\.]+\.crazygames\.com/g, "");
+
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.set("Content-Type", "text/html; charset=utf-8");
+      responseHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      responseHeaders.delete("Content-Length");
+      responseHeaders.delete("Content-Encoding");
 
       return new Response(html, {
         status: response.status,
         statusText: response.statusText,
-        headers: {
-          ...Object.fromEntries(response.headers),
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-        },
+        headers: responseHeaders,
       });
     }
+
+    // For non-HTML, return as-is
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.delete("Content-Length");
 
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: Object.fromEntries(response.headers),
+      headers: responseHeaders,
     });
   } catch (error) {
     console.error("Upstream fetch failed:", error);
@@ -146,7 +181,6 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       return new Response("Invalid URL", { status: 400 });
     }
 
-    // Allow all URLs to be proxied
     return proxyRequest(target, request, env);
   }
 
