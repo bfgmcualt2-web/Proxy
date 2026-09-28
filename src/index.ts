@@ -38,8 +38,18 @@ function sanitizeUrl(url: string): URL | null {
 function isAllowedAssetHost(host: string | null, targetHost: string, allowedHosts: Set<string>): boolean {
   const lower = String(host || "").toLowerCase();
   if (!lower) return false;
-  if (lower === targetHost.toLowerCase()) return true;
-  return allowedHosts.has(lower);
+
+  const normalizedTarget = targetHost.toLowerCase();
+  if (lower === normalizedTarget || lower.endsWith(`.${normalizedTarget}`)) return true;
+
+  for (const allowed of allowedHosts) {
+    const value = allowed.toLowerCase();
+    if (lower === value || lower.endsWith(`.${value}`)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string, targetHost: string, allowedHosts: Set<string>): string {
