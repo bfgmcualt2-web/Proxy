@@ -6,7 +6,6 @@
 interface Env {
   TARGET_HOST: string;
   TARGET_SCHEME: string;
-  ALLOWED_ASSET_HOSTS: string;
 }
 
 const BROWSER_HEADERS = {
@@ -35,35 +34,25 @@ function sanitizeUrl(url: string): URL | null {
   }
 }
 
-function isAllowedAssetHost(host: string | null, targetHost: string, allowedHosts: Set<string>): boolean {
-  const lower = String(host || "").toLowerCase();
-  if (!lower) return false;
-
-  const normalizedTarget = targetHost.toLowerCase();
-  if (lower === normalizedTarget || lower.endsWith(`.${normalizedTarget}`)) return true;
-
-  for (const allowed of allowedHosts) {
-    const value = allowed.toLowerCase();
-    if (lower === value || lower.endsWith(`.${value}`)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string, targetHost: string, allowedHosts: Set<string>): string {
+function rewriteHtmlAssetUrls(html: string, proxyBaseUrl: string): string {
   let rewritten = html;
 
+  // Rewrite all src, href, srcset attributes to proxy through this worker
   rewritten = rewritten.replace(/\b(src|href|srcset)=["']([^"']+)["']/g, (match, attr, url) => {
-    const parsed = sanitizeUrl(url);
-    if (!parsed) return match;
-
-    if (!isAllowedAssetHost(parsed.hostname, targetHost, allowedHosts)) {
+    // Skip data URIs, anchors, and javascript
+    if (url.startsWith("data:") || url.startsWith("#") || url.startsWith("javascript:")) {
       return match;
     }
 
-    const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(parsed.toString())}`;
+    // If it's a relative URL, make it absolute
+    let absoluteUrl = url;
+    if (url.startsWith("/")) {
+      absoluteUrl = `https://crazygames.com${url}`;
+    } else if (!url.startsWith("http")) {
+      absoluteUrl = `https://crazygames.com/${url}`;
+    }
+
+    const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteUrl)}`;
     return `${attr}="${proxiedUrl}"`;
   });
 
@@ -99,13 +88,7 @@ async function proxyRequest(url: URL, request: Request, env: Env): Promise<Respo
 
     if (isHtml) {
       let html = await response.text();
-      const allowedHosts = new Set(
-        env.ALLOWED_ASSET_HOSTS.split(",")
-          .map((x) => x.trim().toLowerCase())
-          .filter(Boolean)
-      );
-
-      html = rewriteHtmlAssetUrls(html, "/proxy", env.TARGET_HOST, allowedHosts);
+      html = rewriteHtmlAssetUrls(html, "/proxy");
 
       return new Response(html, {
         status: response.status,
@@ -163,19 +146,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       return new Response("Invalid URL", { status: 400 });
     }
 
-    const allowedHosts = new Set(
-      env.ALLOWED_ASSET_HOSTS.split(",")
-        .map((x) => x.trim().toLowerCase())
-        .filter(Boolean)
-    );
-
-    if (!isAllowedAssetHost(target.hostname, env.TARGET_HOST, allowedHosts)) {
-      return new Response("Asset host not allowed", { status: 403 });
-    }
-
+    // Allow all URLs to be proxied
     return proxyRequest(target, request, env);
   }
 
+  // For any other path, proxy it to the target host
   const targetUrl = new URL(url.pathname + url.search, `${env.TARGET_SCHEME}://${env.TARGET_HOST}`);
   return proxyRequest(targetUrl, request, env);
 }
