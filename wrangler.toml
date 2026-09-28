@@ -10,7 +10,3 @@ ALLOWED_ASSET_HOSTS = "crazygames.com,cdn.crazygames.com,static.crazygames.com,i
 
 [env.production]
 name = "crazygames-proxy-worker-prod"
-
-[[routes]]
-pattern = "proxy.crazygames.com/*"
-zone_name = "crazygames.com"
